@@ -1,5 +1,6 @@
 # foo_timestamp_server
 A foobar2000 component to start an HTTP server opening access to the current playback state and the timestamp.
+
 Version 0.6
 
 # A typical file structure
