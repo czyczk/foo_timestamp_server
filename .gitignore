@@ -328,3 +328,15 @@ ASALocalRun/
 
 # MFractors (Xamarin productivity tool) working folder 
 .mfractor/
+
+###### Project-Specific ######
+# foobar2000 SDK
+pfc/
+foobar2000/ATHHelpers/
+foobar2000/foo_input_validator/
+foobar2000/foo_sample/
+foobar2000/foobar2000_component_client/
+foobar2000/helpers/
+foobar2000/SDK/
+foobar2000/shared/
+
