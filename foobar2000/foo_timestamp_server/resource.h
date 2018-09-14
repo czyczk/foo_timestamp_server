@@ -1,6 +1,6 @@
 ﻿//{{NO_DEPENDENCIES}}
 // Microsoft Visual C++ generated include file.
-// Used by foo_first_test.rc
+// Used by foo_timestamp_server.rc
 //
 #define IDD_TIMESTAMP_STATE             103
 #define IDC_RESULT                      1003
