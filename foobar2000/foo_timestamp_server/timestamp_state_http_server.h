@@ -28,7 +28,7 @@ private:
 	static const std::string options_base;
 	
 public:
-	static std::string ok(std::unique_ptr<std::string> message = nullptr) {
+	static std::string ok(std::unique_ptr<std::string> message = nullptr, bool inJson = true) {
 		std::string base = ok_base + access_control_allow_base;
 		if (message == nullptr) {
 			return base + "\r\n";
@@ -74,39 +74,80 @@ Access-Control-Max-Age: 86400\r\n";
 
 // Callbacks for playback
 namespace PlaybackCallback {
-	class GetTimestampCallback : public main_thread_callback {
-	private:
+	class PlaybackControlCallback {
+	protected:
 		static_api_ptr_t<playback_control> m_pc;
-		std::promise<double> m_promise;
-	public:
-		virtual void callback_run() {
-			m_promise.set_value(m_pc->playback_get_position());
-		}
+	};
 
-		void initialize() {
+	template <typename T>
+	class PromisedCallback {
+	protected:
+		std::promise<T> m_promise;
+	public:
+		virtual void initialize() {
 			m_promise = { };
 		}
 
-		std::future<double> get_future() {
+		virtual std::future<T> get_future() {
 			return m_promise.get_future();
 		}
 	};
 
-	class PlayOrPauseCallback : public main_thread_callback {
-	private:
-		static_api_ptr_t<playback_control> m_pc;
+	// Callback for "Get timestamp"
+	class GetTimestampCallback : public main_thread_callback, PlaybackControlCallback, public PromisedCallback<double> {
+	public:
+		virtual void callback_run() {
+			m_promise.set_value(m_pc->playback_get_position());
+		}
+	};
+
+	// Callback for "Get playback state"
+	class GetPlaybackStateCallback : public main_thread_callback, PlaybackControlCallback, public PromisedCallback<std::string> {
+	public:
+		virtual void callback_run() {
+			std::string result;
+			if (m_pc->is_paused()) {
+				result = "paused";
+			}
+			else if (m_pc->is_playing()) {
+				result = "playing";
+			}
+			else {
+				result = "idle";
+			}
+			m_promise.set_value(result);
+		}
+	};
+
+	// Callback for "Play previous track".
+	class PlayPreviousTrackCallback : public main_thread_callback, PlaybackControlCallback {
+	public:
+		virtual void callback_run() {
+			m_pc->previous();
+		}
+	};
+
+	// Callback for "Play or pause"
+	class PlayOrPauseCallback : public main_thread_callback, PlaybackControlCallback {
 	public:
 		virtual void callback_run() {
 			m_pc->play_or_pause();
 		}
 	};
 
-	class StopCallback : public main_thread_callback {
-	private:
-		static_api_ptr_t<playback_control> m_pc;
+	// Callback for "Stop"
+	class StopCallback : public main_thread_callback, PlaybackControlCallback {
 	public:
 		virtual void callback_run() {
 			m_pc->stop();
+		}
+	};
+
+	// Callback for "Play previous track"
+	class PlayNextTrackCallback : public main_thread_callback, PlaybackControlCallback {
+	public:
+		virtual void callback_run() {
+			m_pc->next();
 		}
 	};
 }
@@ -119,8 +160,11 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 
 	static_api_ptr_t<main_thread_callback_manager> callback_manager;
 	service_ptr_t<GetTimestampCallback> get_timestamp_callback = fb2k::service_new<GetTimestampCallback>();
+	service_ptr_t<GetPlaybackStateCallback> get_playback_state_callback = fb2k::service_new<GetPlaybackStateCallback>();
+	service_ptr_t<PlayPreviousTrackCallback> play_previous_track_callback = fb2k::service_new<PlayPreviousTrackCallback>();
 	service_ptr_t<PlayOrPauseCallback> play_or_pause_callback = fb2k::service_new<PlayOrPauseCallback>();
 	service_ptr_t<StopCallback> stop_callback = fb2k::service_new<StopCallback>();
+	service_ptr_t<PlayNextTrackCallback> play_next_track_callback = fb2k::service_new<PlayNextTrackCallback>();
 
 	// Add resources using path-regex and method-string, and an anonymous function
 	// [Example] GET - /hello
@@ -132,8 +176,14 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		// ss << request->content.rdbuf();
 		// auto content=ss.str();
 		
-		auto message = std::make_unique<std::string>("Hello! I received your GET request.");
-		*response << ResponseTemplate::ok(std::move(message));
+		string message = "Hello! I received your GET request.";
+		ptree root;
+		root.put("msg", message);
+		std::ostringstream oss;
+		write_json(oss, root);
+		auto jsonStr = std::make_unique<std::string>(oss.str());
+
+		*response << ResponseTemplate::ok(std::move(jsonStr));
 	};
 
 	// [Example] POST - /hello
@@ -145,8 +195,14 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		// ss << request->content.rdbuf();
 		// auto content=ss.str();
 
-		auto message = std::make_unique<std::string>("Hello! I received your POST request.");
-		*response << ResponseTemplate::ok(std::move(message));
+		string message = "Hello! I received your POST request.";
+		ptree root;
+		root.put("msg", message);
+		std::ostringstream oss;
+		write_json(oss, root);
+		auto jsonStr = std::make_unique<std::string>(oss.str());
+		
+		*response << ResponseTemplate::ok(std::move(jsonStr));
 	};
 
 	// [Example] GET - /no-content
@@ -162,11 +218,43 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	};
 
 	// GET - /playback/timestamp
+	// Return: Playback position in double
 	server->resource["^/api/v1/playback/timestamp$"]["GET"] = [callback_manager, get_timestamp_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
 		get_timestamp_callback->initialize();
 		auto future = get_timestamp_callback->get_future();
 		callback_manager->add_callback(get_timestamp_callback);
-		*response << ResponseTemplate::ok(future.get());
+
+		double position = future.get();
+		ptree root;
+		root.put("msg", position);
+		std::ostringstream oss;
+		write_json(oss, root);
+		auto jsonStr = std::make_unique<std::string>(oss.str());
+
+		*response << ResponseTemplate::ok(std::move(jsonStr));
+	};
+
+	// GET - /playback/state
+	// Return: "idle" | "paused" | "playing"
+	server->resource["^/api/v1/playback/state$"]["GET"] = [callback_manager, get_playback_state_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		get_playback_state_callback->initialize();
+		auto future = get_playback_state_callback->get_future();
+		callback_manager->add_callback(get_playback_state_callback);
+
+		string state = future.get();
+		ptree root;
+		root.put("msg", state);
+		std::ostringstream oss;
+		write_json(oss, root);
+		auto jsonStr = std::make_unique<std::string>(oss.str());
+
+		*response << ResponseTemplate::ok(std::move(jsonStr));
+	};
+
+	// POST - /playback/previous
+	server->resource["^/api/v1/playback/previous$"]["POST"] = [callback_manager, play_previous_track_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		callback_manager->add_callback(play_previous_track_callback);
+		*response << ResponseTemplate::no_content();
 	};
 
 	// POST - /playback/play-pause
@@ -178,6 +266,12 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	// POST - /playback/stop
 	server->resource["^/api/v1/playback/stop$"]["POST"] = [callback_manager, stop_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
 		callback_manager->add_callback(stop_callback);
+		*response << ResponseTemplate::no_content();
+	};
+
+	// POST - /playback/next
+	server->resource["^/api/v1/playback/next"]["POST"] = [callback_manager, play_next_track_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		callback_manager->add_callback(play_next_track_callback);
 		*response << ResponseTemplate::no_content();
 	};
 
