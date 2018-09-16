@@ -101,6 +101,14 @@ namespace PlaybackCallback {
 		}
 	};
 
+	// Callback for "Get track length"
+	class GetTrackLengthCallback : public main_thread_callback, PlaybackControlCallback, public PromisedCallback<double> {
+	public:
+		virtual void callback_run() {
+			m_promise.set_value(m_pc->playback_get_length());
+		}
+	};
+
 	// Callback for "Get playback state"
 	class GetPlaybackStateCallback : public main_thread_callback, PlaybackControlCallback, public PromisedCallback<std::string> {
 	public:
@@ -160,6 +168,7 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 
 	static_api_ptr_t<main_thread_callback_manager> callback_manager;
 	service_ptr_t<GetTimestampCallback> get_timestamp_callback = fb2k::service_new<GetTimestampCallback>();
+	service_ptr_t<GetTrackLengthCallback> get_track_length_callback = fb2k::service_new<GetTrackLengthCallback>();
 	service_ptr_t<GetPlaybackStateCallback> get_playback_state_callback = fb2k::service_new<GetPlaybackStateCallback>();
 	service_ptr_t<PlayPreviousTrackCallback> play_previous_track_callback = fb2k::service_new<PlayPreviousTrackCallback>();
 	service_ptr_t<PlayOrPauseCallback> play_or_pause_callback = fb2k::service_new<PlayOrPauseCallback>();
@@ -223,6 +232,23 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		get_timestamp_callback->initialize();
 		auto future = get_timestamp_callback->get_future();
 		callback_manager->add_callback(get_timestamp_callback);
+
+		double position = future.get();
+		ptree root;
+		root.put("msg", position);
+		std::ostringstream oss;
+		write_json(oss, root);
+		auto jsonStr = std::make_unique<std::string>(oss.str());
+
+		*response << ResponseTemplate::ok(std::move(jsonStr));
+	};
+
+	// GET - /playback/length
+	// Return: Length of the currently playing track
+	server->resource["^/api/v1/playback/length$"]["GET"] = [callback_manager, get_track_length_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		get_track_length_callback->initialize();
+		auto future = get_track_length_callback->get_future();
+		callback_manager->add_callback(get_track_length_callback);
 
 		double position = future.get();
 		ptree root;
