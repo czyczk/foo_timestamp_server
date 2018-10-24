@@ -47,7 +47,7 @@ private:
 
 	void on_toggle_server_clicked(UINT, int, CWindow);
 
-	void on_toggle_pause_clicked(UINT, int, CWindow) { m_playback_control->toggle_pause(); }
+	void on_toggle_pause_clicked(UINT, int, CWindow) { m_playback_control->play_or_pause(); }
 	void on_stop_clicked(UINT, int, CWindow) { m_playback_control->stop(); }
 	void on_seek_backward_clicked(UINT, int, CWindow);
 	void on_seek_forward_clicked(UINT, int, CWindow);

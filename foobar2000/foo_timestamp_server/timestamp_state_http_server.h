@@ -24,6 +24,7 @@ private:
 	static const std::string access_control_allow_base;
 	static const std::string ok_base;
 	static const std::string no_content_base;
+	static const std::string bad_request_base;
 	static const std::string not_found_base;
 	static const std::string options_base;
 	
@@ -50,6 +51,12 @@ public:
 		return no_content_base + access_control_allow_base + "\r\n";
 	}
 
+	static std::string bad_request(std::unique_ptr<std::string> parameter_names) {
+		std::string base = bad_request_base + access_control_allow_base;
+		std:string resp_msg = (boost::format("Parameters that go wrong: %s") % *parameter_names).str();
+		return (boost::format("%sContent-Length: %d\r\n\r\n%s") % base % resp_msg.length() % resp_msg).str();
+	}
+
 	static std::string not_found() {
 		std::string base = not_found_base + access_control_allow_base;
 		std::string reason = "Unknown command.";
@@ -66,6 +73,7 @@ public:
 const std::string ResponseTemplate::access_control_allow_base = "Access-Control-Allow-Origin: *\r\n";
 const std::string ResponseTemplate::ok_base = "HTTP/1.1 200 OK\r\n";
 const std::string ResponseTemplate::no_content_base = "HTTP/1.1 204 No Content\r\n";
+const std::string ResponseTemplate::bad_request_base = "HTTP/1.1 400 Bad Request\r\n";
 const std::string ResponseTemplate::not_found_base = "HTTP/1.1 404 Not Found\r\n";
 const std::string ResponseTemplate::options_base = ResponseTemplate::access_control_allow_base +
 "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
@@ -151,11 +159,33 @@ namespace PlaybackCallback {
 		}
 	};
 
-	// Callback for "Play previous track"
+	// Callback for "Play next track"
 	class PlayNextTrackCallback : public main_thread_callback, PlaybackControlCallback {
 	public:
 		virtual void callback_run() {
 			m_pc->next();
+		}
+	};
+
+	// Callback for "Seek"
+	class SeekCallback : public main_thread_callback, PlaybackControlCallback {
+	public:
+		// New playback position. In seconds.
+		double position = 0.0;
+
+		virtual void callback_run() {
+			m_pc->playback_seek(position);
+		}
+	};
+
+	// Callback for "Seek delta"
+	class SeekDeltaCallback : public main_thread_callback, PlaybackControlCallback {
+	public:
+		// Playback position delta. In seconds.
+		double delta = 0.0;
+
+		virtual void callback_run() {
+			m_pc->playback_seek_delta(delta);
 		}
 	};
 }
@@ -174,6 +204,8 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	service_ptr_t<PlayOrPauseCallback> play_or_pause_callback = fb2k::service_new<PlayOrPauseCallback>();
 	service_ptr_t<StopCallback> stop_callback = fb2k::service_new<StopCallback>();
 	service_ptr_t<PlayNextTrackCallback> play_next_track_callback = fb2k::service_new<PlayNextTrackCallback>();
+	service_ptr_t<SeekCallback> seek_callback = fb2k::service_new<SeekCallback>();
+	service_ptr_t<SeekDeltaCallback> seek_delta_callback = fb2k::service_new<SeekDeltaCallback>();
 
 	// Add resources using path-regex and method-string, and an anonymous function
 	// [Example] GET - /hello
@@ -296,9 +328,41 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	};
 
 	// POST - /playback/next
-	server->resource["^/api/v1/playback/next"]["POST"] = [callback_manager, play_next_track_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+	server->resource["^/api/v1/playback/next$"]["POST"] = [callback_manager, play_next_track_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
 		callback_manager->add_callback(play_next_track_callback);
 		*response << ResponseTemplate::no_content();
+	};
+
+	// POST - /playback/seek
+	server->resource["^/api/v1/playback/seek$"]["POST"] = [callback_manager, seek_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		try {
+			ptree pt;
+			read_json(request->content, pt);
+
+			auto position = pt.get<double>("position");
+			seek_callback->position = position;
+			callback_manager->add_callback(seek_callback);
+			*response << ResponseTemplate::no_content();
+		}
+		catch (const exception &e) {
+			*response << ResponseTemplate::bad_request(std::make_unique<std::string>("position"));
+		}
+	};
+
+	// POST - /playback/seek-delta
+	server->resource["^/api/v1/playback/seek-delta$"]["POST"] = [callback_manager, seek_delta_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		try {
+			ptree pt;
+			read_json(request->content, pt);
+
+			auto delta = pt.get<double>("delta");
+			seek_delta_callback->delta = delta;
+			callback_manager->add_callback(seek_delta_callback);
+			*response << ResponseTemplate::no_content();
+		}
+		catch (const exception &e) {
+			*response << ResponseTemplate::bad_request(std::make_unique<std::string>("delta"));
+		}
 	};
 
 
