@@ -3,7 +3,7 @@ A foobar2000 component to start an HTTP server opening access to the current pla
 
 Project in development
 
-Version 0.8.0 (2018-10-24)
+Version 0.8.2 (2018-11-14)
 
 # A typical file structure
 Dependent projects from the SDK are listed below:

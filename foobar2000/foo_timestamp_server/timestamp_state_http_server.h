@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "server_http.hpp"
 #include "stdafx.h"
 
@@ -10,6 +10,7 @@
 #include <boost/filesystem.hpp>
 #include <fstream>
 #include <vector>
+#include "text_util.h"
 #ifdef HAVE_OPENSSL
 #include "crypto.hpp"
 #endif
@@ -188,6 +189,28 @@ namespace PlaybackCallback {
 			m_pc->playback_seek_delta(delta);
 		}
 	};
+
+	// Callback for "Title formatting"
+	class TitleFormattingCallback : public main_thread_callback, PlaybackControlCallback, public PromisedCallback<pfc::string_formatter> {
+	private:
+		pfc::string_formatter formatting_result;
+
+	public:
+		// Title formatting code
+		pfc::string8 format = "";
+
+		virtual void callback_run() {
+			// Create a title formatting object using the format specified
+			titleformat_object::ptr tfo;
+			static_api_ptr_t<titleformat_compiler>()->compile_safe_ex(tfo, format.c_str());
+			
+			// Format it
+			m_pc->playback_format_title(NULL, formatting_result, tfo, NULL, playback_control::display_level_all);
+
+			// Push into promise
+			m_promise.set_value(formatting_result);
+		}
+	};
 }
 
 std::shared_ptr<HttpServer> start_server(unsigned short port) {
@@ -206,6 +229,7 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	service_ptr_t<PlayNextTrackCallback> play_next_track_callback = fb2k::service_new<PlayNextTrackCallback>();
 	service_ptr_t<SeekCallback> seek_callback = fb2k::service_new<SeekCallback>();
 	service_ptr_t<SeekDeltaCallback> seek_delta_callback = fb2k::service_new<SeekDeltaCallback>();
+	service_ptr_t<TitleFormattingCallback> title_formatting_callback = fb2k::service_new<TitleFormattingCallback>();
 
 	// Add resources using path-regex and method-string, and an anonymous function
 	// [Example] GET - /hello
@@ -222,9 +246,9 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		root.put("msg", message);
 		std::ostringstream oss;
 		write_json(oss, root);
-		auto jsonStr = std::make_unique<std::string>(oss.str());
+		auto json_str = std::make_unique<std::string>(oss.str());
 
-		*response << ResponseTemplate::ok(std::move(jsonStr));
+		*response << ResponseTemplate::ok(std::move(json_str));
 	};
 
 	// [Example] POST - /hello
@@ -241,9 +265,9 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		root.put("msg", message);
 		std::ostringstream oss;
 		write_json(oss, root);
-		auto jsonStr = std::make_unique<std::string>(oss.str());
+		auto json_str = std::make_unique<std::string>(oss.str());
 		
-		*response << ResponseTemplate::ok(std::move(jsonStr));
+		*response << ResponseTemplate::ok(std::move(json_str));
 	};
 
 	// [Example] GET - /no-content
@@ -270,9 +294,9 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		root.put("msg", position);
 		std::ostringstream oss;
 		write_json(oss, root);
-		auto jsonStr = std::make_unique<std::string>(oss.str());
+		auto json_str = std::make_unique<std::string>(oss.str());
 
-		*response << ResponseTemplate::ok(std::move(jsonStr));
+		*response << ResponseTemplate::ok(std::move(json_str));
 	};
 
 	// GET - /playback/length
@@ -287,9 +311,9 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		root.put("msg", position);
 		std::ostringstream oss;
 		write_json(oss, root);
-		auto jsonStr = std::make_unique<std::string>(oss.str());
+		auto json_str = std::make_unique<std::string>(oss.str());
 
-		*response << ResponseTemplate::ok(std::move(jsonStr));
+		*response << ResponseTemplate::ok(std::move(json_str));
 	};
 
 	// GET - /playback/state
@@ -304,9 +328,9 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		root.put("msg", state);
 		std::ostringstream oss;
 		write_json(oss, root);
-		auto jsonStr = std::make_unique<std::string>(oss.str());
+		auto json_str = std::make_unique<std::string>(oss.str());
 
-		*response << ResponseTemplate::ok(std::move(jsonStr));
+		*response << ResponseTemplate::ok(std::move(json_str));
 	};
 
 	// POST - /playback/previous
@@ -334,6 +358,7 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	};
 
 	// POST - /playback/seek
+	// @param position
 	server->resource["^/api/v1/playback/seek$"]["POST"] = [callback_manager, seek_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
 		try {
 			ptree pt;
@@ -350,6 +375,7 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	};
 
 	// POST - /playback/seek-delta
+	// @param delta
 	server->resource["^/api/v1/playback/seek-delta$"]["POST"] = [callback_manager, seek_delta_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
 		try {
 			ptree pt;
@@ -362,6 +388,45 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		}
 		catch (const exception &e) {
 			*response << ResponseTemplate::bad_request(std::make_unique<std::string>("delta"));
+		}
+	};
+
+	// GET - /track/title-formatting/[format]
+	server->resource["^/api/v1/track/title-formatting/(.*)$"]["GET"] = [callback_manager, title_formatting_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		try {
+			title_formatting_callback->initialize();
+
+			// Read the format specified (URL escaped and UTF-8 encoded)
+			std::string format = request->path_match[1].str();
+
+			// If the format is empty, return an empty response
+			if (format.length() == 0) {
+				*response << ResponseTemplate::ok();
+				return;
+			}
+
+			// Decode URL
+			// (Keep it UTF-8 encoded since the return value is also UTF-8 encoded)
+			format = text_util::url_decode(format);
+
+			// Setup the callback and wait for the result
+			title_formatting_callback->format = pfc::string8(format.c_str());
+			auto future = title_formatting_callback->get_future();
+			callback_manager->add_callback(title_formatting_callback);
+			pfc::string_formatter result = future.get();
+
+			// Send it out
+			// std::string result = text_util::to_utf8(L"参数可读😂：") + format + text_util::to_utf8("。长度：") + std::to_string(format.length());
+			ptree root;
+			root.put("msg", result);
+			std::ostringstream oss;
+			write_json(oss, root);
+			auto jsonStr = std::make_unique<std::string>(oss.str());
+
+			*response << ResponseTemplate::ok(std::move(jsonStr));
+		}
+		catch (const exception &e) {
+			*response << ResponseTemplate::bad_request(std::make_unique<std::string>("format"));
 		}
 	};
 
