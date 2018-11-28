@@ -11,6 +11,7 @@
 #include <fstream>
 #include <vector>
 #include "text_util.h"
+#include "base64_util.h"
 #ifdef HAVE_OPENSSL
 #include "crypto.hpp"
 #endif
@@ -27,6 +28,7 @@ private:
 	static const std::string no_content_base;
 	static const std::string bad_request_base;
 	static const std::string not_found_base;
+	static const std::string internal_server_error_base;
 	static const std::string options_base;
 	
 public:
@@ -48,6 +50,21 @@ public:
 			.str();
 	}
 
+	static std::string ok_image(const void * data, size_t size, bool base64_encoded = false) {
+		std::string base = ok_base + access_control_allow_base + "Content-Type: " + (base64_encoded ? "text/plain" : "image/jpeg") + "\r\n";
+		std::string data_as_str((const char *) data, size);
+
+		if (base64_encoded) {
+			std::string encoded = "data:image/jpeg;base64," + base64_util::encode(data_as_str);
+			return (boost::format("%sContent-Length: %d\r\n\r\n%s") % base % encoded.length() % encoded)
+				.str();
+		}
+		else {
+			return (boost::format("%sContent-Length: %d\r\n\r\n%s") % base % data_as_str.length() % data_as_str)
+				.str();
+		}
+	}
+
 	static std::string no_content() {
 		return no_content_base + access_control_allow_base + "\r\n";
 	}
@@ -66,6 +83,10 @@ public:
 				.str();
 	}
 
+	static std::string internal_server_error() {
+		return internal_server_error_base + access_control_allow_base + "\r\n";
+	}
+
 	static std::string options() {
 		return ok_base + options_base + "\r\n";
 	}
@@ -76,16 +97,22 @@ const std::string ResponseTemplate::ok_base = "HTTP/1.1 200 OK\r\n";
 const std::string ResponseTemplate::no_content_base = "HTTP/1.1 204 No Content\r\n";
 const std::string ResponseTemplate::bad_request_base = "HTTP/1.1 400 Bad Request\r\n";
 const std::string ResponseTemplate::not_found_base = "HTTP/1.1 404 Not Found\r\n";
+const std::string ResponseTemplate::internal_server_error_base = "HTTP/1.1 500 Internal Server Error\r\n";
 const std::string ResponseTemplate::options_base = ResponseTemplate::access_control_allow_base +
 "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n\
 Access-Control-Allow-Headers: Content-Type\r\n\
 Access-Control-Max-Age: 86400\r\n";
 
-// Callbacks for playback
-namespace PlaybackCallback {
+// Callbacks for playback control and track info
+namespace ServiceCallback {
 	class PlaybackControlCallback {
 	protected:
 		static_api_ptr_t<playback_control> m_pc;
+	};
+
+	class AlbumArtCallback {
+	protected:
+		static_api_ptr_t<album_art_manager_v3> m_aam;
 	};
 
 	template <typename T>
@@ -211,10 +238,55 @@ namespace PlaybackCallback {
 			m_promise.set_value(formatting_result);
 		}
 	};
+
+	// Callback for "Track cover"
+	// The promised result can be empty because the track doesn't contain the wanted cover
+	// Or can be null because there's no playing item or of internal errors
+	class TrackCoverCallback : public main_thread_callback, PlaybackControlCallback, AlbumArtCallback, public PromisedCallback<album_art_data_ptr> {
+	public:
+		GUID cover_type; // Either "album_art_ids::cover_front" or "album_art_ids::cover_back"
+
+		virtual void callback_run() {
+			// Get the item handle of the currently playing item
+			metadb_handle_ptr current_item_handle;
+			bool is_success = m_pc->get_now_playing(current_item_handle);
+			if (!is_success) {
+				return fill_with_null_promise();
+			}
+
+			// Use the handle to fetch an album art extractor of the wanted cover
+			auto extractor = m_aam->open(
+				pfc::list_single_ref_t<metadb_handle_ptr>(current_item_handle),
+				pfc::list_single_ref_t<GUID>(cover_type),
+				abort_callback_dummy()
+			);
+			if (!extractor.is_valid() || extractor.is_empty()) {
+				return fill_with_null_promise();
+			}
+
+			// Fetch data from the extractor
+			album_art_data_ptr cover_data;
+			if (!extractor->query(cover_type, cover_data, abort_callback_dummy())) {
+				return fill_with_dummy_promise();
+			}
+
+			// Push into promise
+			m_promise.set_value(cover_data);
+		}
+
+	private:
+		void fill_with_dummy_promise() {
+			m_promise.set_value(album_art_data_ptr());
+		}
+
+		void fill_with_null_promise() {
+			m_promise.set_value(nullptr);
+		}
+	};
 }
 
 std::shared_ptr<HttpServer> start_server(unsigned short port) {
-	using namespace PlaybackCallback;
+	using namespace ServiceCallback;
 
 	std::shared_ptr<HttpServer> server = std::make_shared<HttpServer>();
 	server->config.port = port;
@@ -230,6 +302,7 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 	service_ptr_t<SeekCallback> seek_callback = fb2k::service_new<SeekCallback>();
 	service_ptr_t<SeekDeltaCallback> seek_delta_callback = fb2k::service_new<SeekDeltaCallback>();
 	service_ptr_t<TitleFormattingCallback> title_formatting_callback = fb2k::service_new<TitleFormattingCallback>();
+	service_ptr_t<TrackCoverCallback> track_cover_callback = fb2k::service_new<TrackCoverCallback>();
 
 	// Add resources using path-regex and method-string, and an anonymous function
 	// [Example] GET - /hello
@@ -427,6 +500,44 @@ std::shared_ptr<HttpServer> start_server(unsigned short port) {
 		}
 		catch (const exception &e) {
 			*response << ResponseTemplate::bad_request(std::make_unique<std::string>("format"));
+		}
+	};
+
+	// GET - /track/cover/[type]
+	// @param type Either "front" or "back". "front" by default.
+	server->resource["^/api/v1/track/cover(.*)$"]["GET"] = [callback_manager, track_cover_callback](shared_ptr<HttpServer::Response> response, shared_ptr<HttpServer::Request> request) {
+		try {
+			track_cover_callback->initialize();
+
+			// Read the type specified (URL escaped and UTF-8 encoded)
+			std::string type_str = request->path_match[1].str();
+
+			GUID cover_type;
+			// Front: empty || "/" || "/front"
+			if (type_str.length() == 0 || type_str == "/" || type_str == "/front") {
+				cover_type = album_art_ids::cover_front;
+			}
+			else if (type_str == "/back") {
+				cover_type = album_art_ids::cover_back;
+			}
+			else {
+				throw exception();
+			}
+
+			// Setup the callback and fetch the result
+			track_cover_callback->cover_type = cover_type;
+			auto future = track_cover_callback->get_future();
+			callback_manager->add_callback(track_cover_callback);
+			auto result = future.get();
+
+			if (result == nullptr) {
+				*response << ResponseTemplate::internal_server_error();
+				return;
+			}
+			*response << ResponseTemplate::ok_image(result->get_ptr(), result->get_size());
+		}
+		catch (const exception) {
+			*response << ResponseTemplate::bad_request(std::make_unique<std::string>("type"));
 		}
 	};
 
